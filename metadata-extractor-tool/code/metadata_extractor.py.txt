@@ -1,0 +1,269 @@
+# =========================
+# Metadata Extractor Tool
+# =========================
+
+import os
+import re
+import hashlib
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image
+from PIL.ExifTags import TAGS
+from docx import Document
+from PyPDF2 import PdfReader
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+
+# =========================
+# CVE DATABASE (DEMO OFFLINE)
+# =========================
+CVE_DB = {
+    "CVE-2018-1312": {
+        "severity": "CRITICAL",
+        "description": "Apache HTTPD weak digest authentication"
+    },
+    "CVE-2021-44228": {
+        "severity": "CRITICAL",
+        "description": "Log4Shell remote code execution"
+    }
+}
+
+CVE_PATTERN = r"CVE-\d{4}-\d{4,7}"
+
+# =========================
+# THREAT INTELLIGENCE (DEMO)
+# =========================
+KNOWN_BAD_HASHES = {
+    "e3b0c44298fc1c149afbf4c8996fb924": "Known malware sample"
+}
+
+def threat_check(md5, sha256):
+    return "⚠ MALICIOUS" if md5 in KNOWN_BAD_HASHES else "✔ CLEAN"
+
+# =========================
+# HASHING
+# =========================
+def get_hashes(path):
+    md5 = hashlib.md5()
+    sha = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            md5.update(chunk)
+            sha.update(chunk)
+    return md5.hexdigest(), sha.hexdigest()
+
+# =========================
+# METADATA EXTRACTION
+# =========================
+def extract_metadata(path):
+    meta = {}
+    ext = path.lower()
+
+    try:
+        if ext.endswith((".jpg", ".jpeg", ".png")):
+            img = Image.open(path)
+            exif = img._getexif()
+            if exif:
+                for k, v in exif.items():
+                    meta[TAGS.get(k, k)] = str(v)
+
+        elif ext.endswith(".docx"):
+            d = Document(path)
+            p = d.core_properties
+            meta = {
+                "Author": p.author,
+                "Created": str(p.created),
+                "Modified": str(p.modified)
+            }
+
+        elif ext.endswith(".pdf"):
+            r = PdfReader(path)
+            meta["Pages"] = len(r.pages)
+            if r.metadata:
+                for k, v in r.metadata.items():
+                    meta[k] = str(v)
+
+        elif ext.endswith(".txt"):
+            with open(path, "r", errors="ignore") as f:
+                meta["Preview"] = f.read(2000)
+
+    except Exception as e:
+        meta["Error"] = str(e)
+
+    return meta
+
+# =========================
+# CVE DETECTION
+# =========================
+def detect_cves(text):
+    found = set(re.findall(CVE_PATTERN, text))
+    results = []
+
+    for cve in found:
+        info = CVE_DB.get(cve, {
+            "severity": "UNKNOWN",
+            "description": "No local record found"
+        })
+        results.append(f"{cve} | {info['severity']} | {info['description']}")
+
+    return results
+
+# =========================
+# GUI SETUP
+# =========================
+root = tk.Tk()
+root.title("Metadata Extractor with AI Threat Intelligence")
+root.geometry("1300x850")
+
+# =========================
+# TABLE
+# =========================
+columns = ("File", "MD5", "SHA256", "Threat")
+tree = ttk.Treeview(root, columns=columns, show="headings")
+
+for col in columns:
+    tree.heading(col, text=col)
+    tree.column(col, width=300)
+
+tree.pack(fill="x", padx=5, pady=5)
+
+# =========================
+# METADATA PANEL
+# =========================
+meta_frame = ttk.LabelFrame(root, text="Metadata & CVE Analysis")
+meta_frame.pack(fill="both", expand=True, padx=5)
+
+meta_text = tk.Text(meta_frame, wrap="word", height=14)
+meta_text.pack(fill="both", expand=True)
+
+# =========================
+# PREVIEW PANEL
+# =========================
+preview_frame = ttk.LabelFrame(root, text="File Preview")
+preview_frame.pack(fill="both", expand=True, padx=5)
+
+preview_text = tk.Text(preview_frame, wrap="word", height=12)
+preview_text.pack(fill="both", expand=True)
+
+# =========================
+# STORAGE
+# =========================
+file_store = {}
+analysis_store = {}
+
+# =========================
+# DISPLAY SELECTION
+# =========================
+def on_select(event):
+    row = tree.focus()
+    if not row:
+        return
+
+    path = file_store[row]
+    meta = extract_metadata(path)
+
+    meta_text.delete("1.0", tk.END)
+    combined_text = ""
+
+    for k, v in meta.items():
+        meta_text.insert(tk.END, f"{k}: {v}\n")
+        combined_text += str(v) + "\n"
+
+    # CVE Detection
+    cves = detect_cves(combined_text)
+    if cves:
+        meta_text.insert(tk.END, "\nDetected CVEs:\n")
+        for c in cves:
+            meta_text.insert(tk.END, f"- {c}\n")
+    else:
+        meta_text.insert(tk.END, "\nNo CVEs detected\n")
+
+    analysis_store[row] = (meta, cves)
+
+    preview_text.delete("1.0", tk.END)
+    try:
+        if path.lower().endswith(".txt"):
+            with open(path, "r", errors="ignore") as f:
+                preview_text.insert(tk.END, f.read(3000))
+        else:
+            preview_text.insert(tk.END, "Preview not available for this format.")
+    except Exception as e:
+        preview_text.insert(tk.END, str(e))
+
+tree.bind("<<TreeviewSelect>>", on_select)
+
+# =========================
+# FILE HANDLING
+# =========================
+def add_file(path):
+    md5, sha = get_hashes(path)
+    threat = threat_check(md5, sha)
+    row = tree.insert("", "end", values=(os.path.basename(path), md5, sha, threat))
+    file_store[row] = path
+
+def select_files():
+    for f in filedialog.askopenfilenames():
+        add_file(f)
+
+def select_folder():
+    folder = filedialog.askdirectory()
+    if folder:
+        for f in os.listdir(folder):
+            p = os.path.join(folder, f)
+            if os.path.isfile(p):
+                add_file(p)
+
+# =========================
+# REPORT EXPORT
+# =========================
+def export_html():
+    path = filedialog.asksaveasfilename(defaultextension=".html")
+    if not path:
+        return
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("<h1>Forensic Metadata Report</h1>")
+        for row in tree.get_children():
+            file = tree.item(row)["values"][0]
+            meta, cves = analysis_store.get(row, ({}, []))
+            f.write(f"<h3>{file}</h3><pre>{meta}</pre>")
+            if cves:
+                f.write("<b>CVEs:</b><ul>")
+                for c in cves:
+                    f.write(f"<li>{c}</li>")
+                f.write("</ul>")
+
+    messagebox.showinfo("Export", "HTML report generated successfully")
+
+def export_pdf():
+    path = filedialog.asksaveasfilename(defaultextension=".pdf")
+    if not path:
+        return
+
+    doc = SimpleDocTemplate(path)
+    styles = getSampleStyleSheet()
+    content = []
+
+    for row in tree.get_children():
+        file = tree.item(row)["values"][0]
+        meta, cves = analysis_store.get(row, ({}, []))
+        content.append(Paragraph(f"<b>{file}</b>", styles["Heading2"]))
+        content.append(Paragraph(str(meta), styles["Normal"]))
+        for c in cves:
+            content.append(Paragraph(c, styles["Normal"]))
+
+    doc.build(content)
+    messagebox.showinfo("Export", "PDF report generated successfully")
+
+# =========================
+# BUTTONS
+# =========================
+btn_frame = ttk.Frame(root)
+btn_frame.pack(pady=8)
+
+ttk.Button(btn_frame, text="Select Files", command=select_files).pack(side="left", padx=5)
+ttk.Button(btn_frame, text="Select Folder", command=select_folder).pack(side="left", padx=5)
+ttk.Button(btn_frame, text="Export HTML", command=export_html).pack(side="left", padx=5)
+ttk.Button(btn_frame, text="Export PDF", command=export_pdf).pack(side="left", padx=5)
+
+root.mainloop()
