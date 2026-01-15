@@ -267,3 +267,4 @@ ttk.Button(btn_frame, text="Export HTML", command=export_html).pack(side="left",
 ttk.Button(btn_frame, text="Export PDF", command=export_pdf).pack(side="left", padx=5)
 
 root.mainloop()
+
